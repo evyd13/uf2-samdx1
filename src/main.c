@@ -56,11 +56,18 @@
  *
  * Clock system
  * --------------------
- * CPU clock source (GCLK_GEN_0) - 8MHz internal oscillator (OSC8M)
- * SERCOM5 core GCLK source (GCLK_ID_SERCOM5_CORE) - GCLK_GEN_0 (i.e., OSC8M)
- * GCLK Generator 1 source (GCLK_GEN_1) - 48MHz DFLL in Clock Recovery mode
+ * CPU clock source (GCLK_GEN_0) - 48MHz DFLL oscillator (DFLL48M)
+ * SERCOM5 core GCLK source (GCLK_ID_SERCOM5_CORE) - GCLK_GEN_0 (i.e., FDLL48M)
+ * USB GCLK source (GCLK_ID_USB) - GCLK_GEN_0 (i.e., DFLL in CRM or open loop mode)
+ *
+ * Crystalless mode:
+ * GCLK Generator 0 source (GCLK_GEN_0) - 48MHz DFLL in Clock Recovery mode
  * (DFLL48M)
- * USB GCLK source (GCLK_ID_USB) - GCLK_GEN_1 (i.e., DFLL in CRM mode)
+ *
+ * Crytal mode:
+ * GCLK Generator 0 source (GCLK_GEN_0) - 48MHz DFLL in closed loop mode
+ * GCLK Generator 1 source (GCLK_GEN_1) - 32 kHz external cyrstal (XOSC32K)
+ * DFLL48M Refence clock (GCLK_DFLL48M_REF) - GCLK_GEN_1 (i.e., XOSC32K)
  *
  * Memory Mapping
  * --------------------
@@ -164,6 +171,41 @@ int main(void) {
         }
 
 #if defined(SAMD21)
+    // Check for voltage too low, and set up brownout protection.
+    // Code largely taken from https://blog.thea.codes/sam-d21-brown-out-detector/ (thanks!)
+
+    // Disable the brown-out detector during configuration, otherwise
+    // it might misbehave and reset the microcontroller.
+    SYSCTRL->BOD33.bit.ENABLE = 0;
+    while (!SYSCTRL->PCLKSR.bit.B33SRDY) {};
+
+    // Configure the brown-out detector so that the program can use it to watch the power supply voltage.
+    SYSCTRL->BOD33.reg = (
+        // This sets the minimum voltage level to about 2.9V. See datasheet table 37-21.
+        // Voltage threshold is about 1.5V + LEVEL * 34mV. See "Electrical Characteristics" in datasheet.
+        // 39 is about 2.8V, and is a standard measured value in the datasheet.
+        // External flash chips usually require at least 2.7V.
+        SYSCTRL_BOD33_LEVEL(39) |
+        // Since the program is waiting for the voltage to rise,
+        // don't reset the microcontroller if the voltage is too low.
+        SYSCTRL_BOD33_ACTION_NONE |
+        // Enable hysteresis to better deal with noisy power supplies and voltage transients.
+        SYSCTRL_BOD33_HYST);
+
+    // Enable the brown-out detector and then wait for the voltage level to settle.
+    SYSCTRL->BOD33.bit.ENABLE = 1;
+    while (!SYSCTRL->PCLKSR.bit.BOD33RDY) {}
+
+    // BOD33DET is set when the voltage is *too low*, so wait for it to be cleared.
+    while (SYSCTRL->PCLKSR.bit.BOD33DET) {}
+
+    // Let the brown-out detector automatically reset the microcontroller if the voltage drops too low.
+    SYSCTRL->BOD33.bit.ENABLE = 0;
+    while (!SYSCTRL->PCLKSR.bit.B33SRDY) {};
+
+    SYSCTRL->BOD33.reg |= SYSCTRL_BOD33_ACTION_RESET;
+    SYSCTRL->BOD33.bit.ENABLE = 1;
+
     // If fuses have been reset to all ones, the watchdog ALWAYS-ON is
     // set, so we can't turn off the watchdog.  Set the fuse to a
     // reasonable value and reset. This is a mini version of the fuse
@@ -210,6 +252,7 @@ int main(void) {
     SUPC->BOD33.bit.LEVEL = 200;  // 2.7V: 1.5V + LEVEL * 6mV.
     // Don't reset right now.
     SUPC->BOD33.bit.ACTION = SUPC_BOD33_ACTION_NONE_Val;
+    SUPC->BOD33.bit.RUNSTDBY = 1;
     SUPC->BOD33.bit.ENABLE = 1; // enable brown-out detection
 
     // Wait for BOD33 peripheral to be ready.
